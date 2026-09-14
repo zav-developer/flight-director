@@ -13,8 +13,14 @@ Every specialist runs in a named tab inside the current Herdr workspace.
 | Engineer | `eng` | Implement changes |
 | Inspector | `ins` | Review without changing the project |
 
-Flight Director delegates only when a separate context or independent workstream is useful.
+Flight Director handles small, obvious work directly and delegates only when a separate context, independent judgment, or parallel workstream is useful.
+Luna stays at xhigh for quality, so Probe and Inspector assignments use tight scope and explicit stopping conditions to control its tendency toward long investigations.
 The default limit is two working specialists and one Engineer per checkout.
+
+Specialists run asynchronously.
+After dispatch, Flight Director ends its turn instead of polling.
+A completed or blocked specialist injects an event that wakes Flight Director, just as a new user message does.
+Completed tabs are closed after their results are consumed unless the user asks to keep them.
 
 ## Requirements
 

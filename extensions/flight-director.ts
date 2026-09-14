@@ -172,11 +172,81 @@ const RoleSchema = Type.Union([
 ]);
 
 export default function flightDirector(pi: ExtensionAPI) {
+  const watchers = new Map<string, AbortController>();
+
+  const watch = (pane: string, name: string) => {
+    watchers.get(pane)?.abort();
+    const controller = new AbortController();
+    watchers.set(pane, controller);
+
+    void (async () => {
+      await herdr(["agent", "wait", pane], controller.signal);
+      const info = await specialistInfo(pane, controller.signal);
+      if (!["idle", "done", "blocked"].includes(info?.agent_status)) return;
+
+      let output = await runHerdr(
+        [
+          "agent",
+          "read",
+          pane,
+          "--source",
+          "recent-unwrapped",
+          "--lines",
+          "100",
+          "--format",
+          "text",
+        ],
+        controller.signal,
+      );
+      output = finalReport(output);
+      if (output.length > MAX_OUTPUT_CHARS)
+        output = output.slice(-MAX_OUTPUT_CHARS);
+
+      const blocked = info.agent_status === "blocked";
+      pi.sendMessage(
+        {
+          customType: "flight-director-event",
+          content: [
+            "Flight Director specialist event.",
+            `Name: ${name}`,
+            `Pane: ${pane}`,
+            `Status: ${info.agent_status}`,
+            blocked
+              ? "The specialist needs intervention. Keep its tab open."
+              : "Reconcile this result with the user's latest request, continue the task, then close the completed tab with fd_stop after consuming the result.",
+            "Report:",
+            output,
+          ].join("\n"),
+          display: true,
+          details: { name, pane, status: info.agent_status },
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+    })()
+      .catch((error) => {
+        if (!controller.signal.aborted)
+          console.error(
+            `Flight Director watcher failed for ${name}: ${cleanError(error)}`,
+          );
+      })
+      .finally(() => {
+        if (watchers.get(pane) === controller) watchers.delete(pane);
+      });
+  };
+
+  pi.on("session_shutdown", async () => {
+    for (const controller of watchers.values()) controller.abort();
+    watchers.clear();
+  });
+
   pi.registerTool({
     name: "fd_dispatch",
     label: "FD Dispatch",
     description:
-      "Start one visible Probe, Engineer, or Inspector in the current Herdr workspace. Role determines model and effort. Returns the pane ID used by other fd tools.",
+      "Start one visible Probe, Engineer, or Inspector in the current Herdr workspace. Role determines model and effort. Returns immediately after work starts; completion or blockage wakes Flight Director automatically.",
+    promptGuidelines: [
+      "After fd_dispatch starts all currently useful specialists, end the turn instead of polling; specialist events wake Flight Director automatically.",
+    ],
     parameters: Type.Object({
       role: RoleSchema,
       task: Type.String({
@@ -302,6 +372,7 @@ export default function flightDirector(pi: ExtensionAPI) {
           ],
           signal,
         );
+        watch(paneId, name);
 
         return result(
           [
@@ -359,45 +430,22 @@ export default function flightDirector(pi: ExtensionAPI) {
     name: "fd_result",
     label: "FD Result",
     description:
-      "Wait for a specialist and read its recent terminal output. Use the pane ID returned by fd_dispatch.",
+      "Read a specialist's current state without waiting. Completion and blockage normally arrive as automatic events.",
+    promptGuidelines: [
+      "Use fd_result only for a manual nonblocking status check; never poll a working specialist.",
+    ],
     parameters: Type.Object({
       pane: Type.String({
         description: "Specialist pane ID returned by fd_dispatch",
       }),
-      wait: Type.Optional(
-        Type.Boolean({
-          description: "Wait for idle, done, or blocked; default true",
-        }),
-      ),
-      timeoutMs: Type.Optional(
-        Type.Number({
-          description: "Wait timeout in milliseconds; default 300000",
-          minimum: 1000,
-          maximum: 900000,
-        }),
-      ),
     }),
     async execute(_id, params, signal) {
       try {
         const info = await specialistInfo(params.pane, signal);
-        let timedOut = false;
-        if (params.wait !== false) {
-          try {
-            await herdr(
-              [
-                "agent",
-                "wait",
-                params.pane,
-                "--timeout",
-                String(params.timeoutMs || 300_000),
-              ],
-              signal,
-            );
-          } catch (error) {
-            if (/timeout/i.test(cleanError(error))) timedOut = true;
-            else throw error;
-          }
-        }
+        if (info?.agent_status === "working")
+          return result(
+            `agent:\n  status: working\n  pane: ${quote(params.pane)}\nhelp: End the turn and wait for the automatic specialist event`,
+          );
         let output = await runHerdr(
           [
             "agent",
@@ -417,15 +465,11 @@ export default function flightDirector(pi: ExtensionAPI) {
         if (truncated) output = output.slice(-MAX_OUTPUT_CHARS);
         const lines = [
           "agent:",
-          `  status: ${timedOut ? "working" : info?.agent_status || "unknown"}`,
+          `  status: ${info?.agent_status || "unknown"}`,
           `  pane: ${quote(params.pane)}`,
           `  output: ${quote(output)}`,
         ];
-        if (timedOut)
-          lines.push(
-            "help: Call fd_result again when the work should be complete",
-          );
-        else if (truncated)
+        if (truncated)
           lines.push(
             "help: Recent output was truncated to its last 12000 characters",
           );
@@ -452,11 +496,22 @@ export default function flightDirector(pi: ExtensionAPI) {
     }),
     async execute(_id, params, signal) {
       try {
-        await specialistInfo(params.pane, signal);
+        const info = await specialistInfo(params.pane, signal);
         await herdr(
-          ["agent", "prompt", params.pane, `Follow-up:\n${params.message}`],
+          [
+            "agent",
+            "prompt",
+            params.pane,
+            `Follow-up:\n${params.message}`,
+            "--wait",
+            "--until",
+            "working",
+            "--timeout",
+            "10000",
+          ],
           signal,
         );
+        watch(params.pane, info.name || params.pane);
         return result(
           `agent:\n  pane: ${quote(params.pane)}\n  status: working`,
         );
@@ -470,7 +525,7 @@ export default function flightDirector(pi: ExtensionAPI) {
     name: "fd_stop",
     label: "FD Stop",
     description:
-      "Stop a specialist by closing its Herdr tab. Requires confirmation in interactive Pi sessions.",
+      "Close a completed specialist tab, or interrupt a working specialist with confirmation.",
     parameters: Type.Object({
       pane: Type.String({ description: "Specialist pane ID" }),
     }),
@@ -478,13 +533,21 @@ export default function flightDirector(pi: ExtensionAPI) {
       try {
         const info = await specialistInfo(params.pane, signal);
         if (!info?.tab_id) throw new Error("The specialist has no Herdr tab");
-        if (ctx.hasUI) {
+        const settled = ["idle", "done"].includes(info.agent_status);
+        if (!settled && !ctx.hasUI)
+          return result(
+            `error: ${info.agent_status} specialists require interactive confirmation before interruption`,
+            true,
+          );
+        if (!settled) {
           const approved = await ctx.ui.confirm(
-            "Stop specialist?",
-            `Close tab ${info.tab_id} and terminate the agent in ${params.pane}?`,
+            "Interrupt specialist?",
+            `Close tab ${info.tab_id} and terminate the ${info.agent_status} agent in ${params.pane}?`,
           );
           if (!approved) return result("status: canceled");
         }
+        watchers.get(params.pane)?.abort();
+        watchers.delete(params.pane);
         await herdr(["tab", "close", info.tab_id], signal);
         return result(
           `agent:\n  pane: ${quote(params.pane)}\n  status: stopped`,

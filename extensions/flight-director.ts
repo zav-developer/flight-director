@@ -1,12 +1,22 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { findSessionFile, readFinalReport } from "../src/session-report.ts";
 
 const execFileAsync = promisify(execFile);
 const MAX_WORKING_SPECIALISTS = 2;
 const MAX_OUTPUT_CHARS = 12_000;
+const specialistSessionDir = join(
+  process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
+  "sessions",
+  "flight-director",
+);
 const reportProtocol = fileURLToPath(
   new URL("../roles/protocol.md", import.meta.url),
 );
@@ -48,11 +58,17 @@ function quote(value: unknown): string {
   return JSON.stringify(String(value ?? ""));
 }
 
-function finalReport(output: string): string {
-  const reports = [
-    ...output.matchAll(/<FD_RESULT>\s*([\s\S]*?)\s*<\/FD_RESULT>/g),
-  ];
-  return reports.at(-1)?.[1] || output;
+async function structuredReport(sessionId: string): Promise<string> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      return readFinalReport(findSessionFile(specialistSessionDir, sessionId));
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  throw lastError;
 }
 
 function cleanError(error: any): string {
@@ -172,37 +188,49 @@ const RoleSchema = Type.Union([
 ]);
 
 export default function flightDirector(pi: ExtensionAPI) {
+  mkdirSync(specialistSessionDir, { recursive: true });
   const watchers = new Map<string, AbortController>();
+  const sessions = new Map<string, string>();
 
-  const watch = (pane: string, name: string) => {
+  const watch = (pane: string, name: string, sessionId: string) => {
     watchers.get(pane)?.abort();
     const controller = new AbortController();
     watchers.set(pane, controller);
+    sessions.set(pane, sessionId);
 
     void (async () => {
       await herdr(["agent", "wait", pane], controller.signal);
       const info = await specialistInfo(pane, controller.signal);
       if (!["idle", "done", "blocked"].includes(info?.agent_status)) return;
 
-      let output = await runHerdr(
-        [
-          "agent",
-          "read",
-          pane,
-          "--source",
-          "recent-unwrapped",
-          "--lines",
-          "100",
-          "--format",
-          "text",
-        ],
-        controller.signal,
-      );
-      output = finalReport(output);
+      const blocked = info.agent_status === "blocked";
+      let output: string;
+      if (blocked) {
+        output = await runHerdr(
+          [
+            "agent",
+            "read",
+            pane,
+            "--source",
+            "recent-unwrapped",
+            "--lines",
+            "100",
+            "--format",
+            "text",
+          ],
+          controller.signal,
+        );
+      } else {
+        try {
+          output = await structuredReport(sessionId);
+        } catch {
+          output =
+            "Specialist completed without a readable tagged final report.";
+        }
+      }
       if (output.length > MAX_OUTPUT_CHARS)
         output = output.slice(-MAX_OUTPUT_CHARS);
 
-      const blocked = info.agent_status === "blocked";
       pi.sendMessage(
         {
           customType: "flight-director-event",
@@ -237,6 +265,7 @@ export default function flightDirector(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     for (const controller of watchers.values()) controller.abort();
     watchers.clear();
+    sessions.clear();
   });
 
   pi.registerTool({
@@ -326,7 +355,12 @@ export default function flightDirector(pi: ExtensionAPI) {
         if (!tabId || !paneId)
           throw new Error("Herdr did not return the new tab and pane IDs");
 
+        const sessionId = randomUUID();
         const piArgs = [
+          "--session-dir",
+          specialistSessionDir,
+          "--session-id",
+          sessionId,
           "--model",
           spec.model,
           "--thinking",
@@ -372,7 +406,7 @@ export default function flightDirector(pi: ExtensionAPI) {
           ],
           signal,
         );
-        watch(paneId, name);
+        watch(paneId, name, sessionId);
 
         return result(
           [
@@ -446,21 +480,22 @@ export default function flightDirector(pi: ExtensionAPI) {
           return result(
             `agent:\n  status: working\n  pane: ${quote(params.pane)}\nhelp: End the turn and wait for the automatic specialist event`,
           );
-        let output = await runHerdr(
-          [
-            "agent",
-            "read",
-            params.pane,
-            "--source",
-            "recent-unwrapped",
-            "--lines",
-            "100",
-            "--format",
-            "text",
-          ],
-          signal,
-        );
-        output = finalReport(output);
+        const sessionId =
+          sessions.get(params.pane) || info.agent_session?.value;
+        if (!sessionId)
+          return result(
+            `error: no structured Pi session is known for ${params.pane}`,
+            true,
+          );
+        let output: string;
+        try {
+          output = await structuredReport(sessionId);
+        } catch {
+          return result(
+            "error: specialist completed without a readable tagged final report",
+            true,
+          );
+        }
         const truncated = output.length > MAX_OUTPUT_CHARS;
         if (truncated) output = output.slice(-MAX_OUTPUT_CHARS);
         const lines = [
@@ -511,7 +546,14 @@ export default function flightDirector(pi: ExtensionAPI) {
           ],
           signal,
         );
-        watch(params.pane, info.name || params.pane);
+        const sessionId =
+          sessions.get(params.pane) || info.agent_session?.value;
+        if (!sessionId)
+          return result(
+            `error: no structured Pi session is known for ${params.pane}`,
+            true,
+          );
+        watch(params.pane, info.name || params.pane, sessionId);
         return result(
           `agent:\n  pane: ${quote(params.pane)}\n  status: working`,
         );
@@ -548,6 +590,7 @@ export default function flightDirector(pi: ExtensionAPI) {
         }
         watchers.get(params.pane)?.abort();
         watchers.delete(params.pane);
+        sessions.delete(params.pane);
         await herdr(["tab", "close", info.tab_id], signal);
         return result(
           `agent:\n  pane: ${quote(params.pane)}\n  status: stopped`,

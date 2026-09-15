@@ -20,6 +20,7 @@ The default limit is two working specialists and one Engineer per checkout.
 Specialists run asynchronously.
 After dispatch, Flight Director ends its turn instead of polling.
 A completed or blocked specialist injects an event that wakes Flight Director, just as a new user message does.
+Completed reports come from the specialist's structured Pi session rather than a terminal snapshot.
 Completed tabs are closed after their results are consumed unless the user asks to keep them.
 
 ## Requirements

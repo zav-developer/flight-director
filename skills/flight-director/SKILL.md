@@ -20,6 +20,20 @@ Use one specialist when the task has a bounded independent outcome.
 Use a sequence or parallel specialists only when their workstreams are genuinely independent or require different authority.
 Do not send a Probe before an Engineer when the Engineer can cheaply inspect the necessary context.
 
+## Planning sequence
+
+Use Planner when an expensive or constrained implementation benefits from a separate decision pass.
+Do not add Planner to work whose implementation path is already clear.
+
+1. Gather the evidence needed for the decision, using Probe only when separate investigation buys meaningful context isolation.
+2. Assemble a self-contained packet with the current intent, relevant instructions, direct evidence, constraints, available options, and material uncertainty.
+3. Dispatch Planner with the decision as `task` and the evidence packet as `context`.
+4. Reconcile its one recommendation with the latest user intent, then give Engineer the accepted plan without making it rediscover the evidence.
+
+Complete needed exploration before starting Planner.
+Planner receives no project context beyond the packet and accepts no follow-up.
+Launch a fresh Planner with a complete packet when another planning pass is needed.
+
 ## Dispatch
 
 1. Restate the user's latest requested outcome before composing the assignment.
@@ -53,11 +67,12 @@ Preserve the user's wording for identity-sensitive or easily confused choices su
 The latest user message is authoritative.
 Never contradict it in a downstream assignment without first asking the user.
 
-| Role | Tab | Model | Authority |
-| --- | --- | --- | --- |
-| Probe | `pb-<topic>` | Luna xhigh | Investigate without project changes |
-| Engineer | `eng-<topic>` | Sol medium | Implement within the assigned scope |
-| Inspector | `ins-<topic>` | Luna xhigh | Review without project changes |
+| Role      | Tab           | Model        | Authority                                                     |
+| --------- | ------------- | ------------ | ------------------------------------------------------------- |
+| Probe     | `pb-<topic>`  | Luna xhigh   | Investigate without project changes                           |
+| Planner   | `pln-<topic>` | Astra medium | Produce a one-shot implementation plan from a complete packet |
+| Engineer  | `eng-<topic>` | Sol medium   | Implement within the assigned scope                           |
+| Inspector | `ins-<topic>` | Luna xhigh   | Review without project changes                                |
 
 Use a Probe for research or codebase reconnaissance that would otherwise consume substantial coordinator context.
 Use an Engineer for delegated implementation.

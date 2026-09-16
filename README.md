@@ -1,21 +1,24 @@
 # Flight Director
 
 Flight Director gives Pi a small, visible delegation system built on Herdr.
-It routes research and review to GPT-5.6 Luna at xhigh effort and implementation to GPT-5.6 Sol at medium effort.
+It routes research and review to GPT-5.6 Luna at xhigh effort, planning to GPT-6 Astra at medium effort, and implementation to GPT-5.6 Sol at medium effort.
 Every specialist runs in a named tab inside the current Herdr workspace.
 
 ## Roles
 
-| Role | Tab prefix | Purpose |
-| --- | --- | --- |
-| Flight Director | `fd` | Own the user request and coordinate work |
-| Probe | `pb` | Investigate without changing the project |
-| Engineer | `eng` | Implement changes |
-| Inspector | `ins` | Review without changing the project |
+| Role            | Tab prefix | Purpose                                                       |
+| --------------- | ---------- | ------------------------------------------------------------- |
+| Flight Director | `fd`       | Own the user request and coordinate work                      |
+| Probe           | `pb`       | Investigate without changing the project                      |
+| Planner         | `pln`      | Produce a one-shot implementation plan from supplied evidence |
+| Engineer        | `eng`      | Implement changes                                             |
+| Inspector       | `ins`      | Review without changing the project                           |
 
 Flight Director handles small, obvious work directly and delegates only when a separate context, independent judgment, or parallel workstream is useful.
 Luna stays at xhigh for quality, so Probe and Inspector assignments use tight scope and explicit stopping conditions to control its tendency toward long investigations.
 The default limit is two working specialists and one Engineer per checkout.
+When a separate planning pass will improve an expensive or constrained implementation, Flight Director completes needed exploration, gives Planner a self-contained evidence packet, then passes the accepted recommendation to Engineer.
+Planner has no tools, skills, context files, or follow-up turns.
 
 Specialists run asynchronously.
 After dispatch, Flight Director ends its turn instead of polling.
@@ -27,7 +30,7 @@ Completed tabs are closed after their results are consumed unless the user asks 
 
 - [Pi](https://github.com/badlogic/pi-mono)
 - [Herdr](https://herdr.dev/)
-- Access to `openai-codex/gpt-5.6-luna` and `openai-codex/gpt-5.6-sol`
+- Access to `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-6-astra`, and `openai-codex/gpt-5.6-sol`
 
 Flight Director only activates inside a Herdr session.
 

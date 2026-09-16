@@ -8,6 +8,14 @@ import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { findSessionFile, readFinalReport } from "../src/session-report.ts";
+import {
+  buildPiArgs,
+  dispatchPrompt,
+  isSpecialist,
+  plannerFollowUpError,
+  roles,
+  type Role,
+} from "../src/specialists.ts";
 
 const execFileAsync = promisify(execFile);
 const MAX_WORKING_SPECIALISTS = 2;
@@ -21,30 +29,6 @@ const reportProtocol = fileURLToPath(
   new URL("../roles/protocol.md", import.meta.url),
 );
 
-const roles = {
-  probe: {
-    prefix: "pb",
-    model: "openai-codex/gpt-5.6-luna",
-    thinking: "xhigh",
-    tools: "read,grep,find,ls,bash",
-    prompt: fileURLToPath(new URL("../roles/probe.md", import.meta.url)),
-  },
-  engineer: {
-    prefix: "eng",
-    model: "openai-codex/gpt-5.6-sol",
-    thinking: "medium",
-    prompt: fileURLToPath(new URL("../roles/engineer.md", import.meta.url)),
-  },
-  inspector: {
-    prefix: "ins",
-    model: "openai-codex/gpt-5.6-luna",
-    thinking: "xhigh",
-    tools: "read,grep,find,ls,bash",
-    prompt: fileURLToPath(new URL("../roles/inspector.md", import.meta.url)),
-  },
-} as const;
-
-type Role = keyof typeof roles;
 type HerdrResponse = {
   result?: Record<string, any>;
   error?: { code?: string; message?: string };
@@ -144,10 +128,6 @@ async function workspacePanes(signal?: AbortSignal): Promise<any[]> {
   return response.result?.panes || [];
 }
 
-function isSpecialist(label: string): boolean {
-  return /^(pb|eng|ins)-/.test(label);
-}
-
 function uniqueName(
   prefix: string,
   topic: string,
@@ -178,11 +158,12 @@ async function specialistInfo(
   const label = tabResponse.result?.tab?.label || "";
   if (!isSpecialist(label))
     throw new Error("The pane does not belong to a Flight Director specialist");
-  return info;
+  return { ...info, flightDirectorLabel: label };
 }
 
 const RoleSchema = Type.Union([
   Type.Literal("probe"),
+  Type.Literal("planner"),
   Type.Literal("engineer"),
   Type.Literal("inspector"),
 ]);
@@ -272,7 +253,7 @@ export default function flightDirector(pi: ExtensionAPI) {
     name: "fd_dispatch",
     label: "FD Dispatch",
     description:
-      "Start one visible Probe, Engineer, or Inspector in the current Herdr workspace. Role determines model and effort. Returns immediately after work starts; completion or blockage wakes Flight Director automatically.",
+      "Start one visible Probe, Planner, Engineer, or Inspector in the current Herdr workspace. Role determines model and effort. Planner requires a complete context packet. Returns immediately after work starts; completion or blockage wakes Flight Director automatically.",
     promptGuidelines: [
       "After fd_dispatch starts all currently useful specialists, end the turn instead of polling; specialist events wake Flight Director automatically.",
     ],
@@ -282,6 +263,12 @@ export default function flightDirector(pi: ExtensionAPI) {
         description: "Complete task for the specialist",
         maxLength: 12_000,
       }),
+      context: Type.Optional(
+        Type.String({
+          description: "Complete evidence packet; required for Planner",
+          maxLength: 100_000,
+        }),
+      ),
       topic: Type.Optional(
         Type.String({
           description: "Short tab topic, such as auth or docs",
@@ -300,6 +287,7 @@ export default function flightDirector(pi: ExtensionAPI) {
       try {
         const role = params.role as Role;
         const spec = roles[role];
+        const prompt = dispatchPrompt(role, params.task, params.context);
         const cwd = params.cwd || ctx.cwd;
         const tabs = await workspaceTabs(signal);
         const working = tabs.filter(
@@ -356,26 +344,12 @@ export default function flightDirector(pi: ExtensionAPI) {
           throw new Error("Herdr did not return the new tab and pane IDs");
 
         const sessionId = randomUUID();
-        const piArgs = [
-          "--session-dir",
-          specialistSessionDir,
-          "--session-id",
+        const piArgs = buildPiArgs(role, {
+          sessionDir: specialistSessionDir,
           sessionId,
-          "--model",
-          spec.model,
-          "--thinking",
-          spec.thinking,
-          "--append-system-prompt",
-          spec.prompt,
-          "--append-system-prompt",
-          reportProtocol,
-          "--name",
           name,
-          "--exclude-tools",
-          "fd_dispatch,fd_agents,fd_result,fd_prompt,fd_stop",
-          "--approve",
-        ];
-        if ("tools" in spec && spec.tools) piArgs.push("--tools", spec.tools);
+          reportProtocol,
+        });
         await herdr(
           [
             "agent",
@@ -397,7 +371,7 @@ export default function flightDirector(pi: ExtensionAPI) {
             "agent",
             "prompt",
             paneId,
-            `Task:\n${params.task}`,
+            prompt,
             "--wait",
             "--until",
             "working",
@@ -532,6 +506,8 @@ export default function flightDirector(pi: ExtensionAPI) {
     async execute(_id, params, signal) {
       try {
         const info = await specialistInfo(params.pane, signal);
+        const rejection = plannerFollowUpError(info.flightDirectorLabel);
+        if (rejection) return result(`error: ${rejection}`, true);
         await herdr(
           [
             "agent",
